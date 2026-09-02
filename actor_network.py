@@ -1,30 +1,19 @@
-# ---------------------------------------------------------------------------
-# Prompt for reproducing this file (actor_network.py):
-#
-# Write a NumPy-only MLP "ActorNetwork" used in an Actor-Critic RL agent for
-# a 4x4 Wumpus World. Do NOT use torch or sklearn; only numpy.
-#
-# Contract (exact):
-#   - Constructor: ActorNetwork(input_size=5, hidden_sizes=(128, 64), n_actions=4, seed=None)
-#   - Hidden layers use ReLU; output layer produces n_actions logits (no softmax).
-#   - Store layers as a list of (W, b). Initialize weights with:
-#       W = np.random.randn(n_out, n_in) * 0.1,  b = np.zeros(n_out)
-#   - If seed is not None, call np.random.seed(seed) before init.
-#   - Attributes: .layers (list of (W,b)), keep a copy .params = [(W,b),...]
-#     so optimizers can mutate weights in place.
-#   - .forward(x): x is 1D np.float32 array-ish (len == input_size). Return a
-#     1D np.ndarray of n_actions logits. Hidden layers: out = W@in + b, then
-#     ReLU(max(0,.)). Final layer: linear output, no activation.
-#   - Follow numpy conventions and keep it a self-contained plain-Python class.
-# ---------------------------------------------------------------------------
+"""NumPy-only MLP Actor Network for One-Step Actor-Critic.
+
+Architecture:
+    Input(64) -> Linear(64->128) -> ReLU -> Linear(128->64) -> ReLU -> Linear(64->4) -> logits
+
+Actions are sampled from softmax(logits) during training.
+Deterministic policy uses argmax(logits) after training.
+"""
 
 import numpy as np
 
 
 class ActorNetwork:
-    """NumPy MLP policy network: state -> action logits (separate from critic)."""
+    """NumPy MLP policy network: state -> action logits."""
 
-    def __init__(self, input_size=5, hidden_sizes=(128, 64), n_actions=4, seed=None):
+    def __init__(self, input_size=64, hidden_sizes=(128, 64), n_actions=4, seed=None):
         if seed is not None:
             np.random.seed(seed)
         self.layers = []
@@ -40,11 +29,12 @@ class ActorNetwork:
         self.params = list(self.layers)
 
     def forward(self, x):
+        """Forward pass returning raw logits (1D array of length n_actions)."""
         x = np.asarray(x, dtype=np.float32)
         h = x
         for i, (W, b) in enumerate(self.layers):
             out = W @ h + b
             if i < len(self.layers) - 1:
-                out = np.maximum(out, 0)  # ReLU on hidden layers
+                out = np.maximum(out, 0)  # ReLU
             h = out
         return h

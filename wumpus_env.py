@@ -1,8 +1,7 @@
-"""Wumpus World 4x4 grid environment for Actor-Critic RL.
+"""Wumpus World 4x4 grid environment for One-Step Actor-Critic RL.
 
-State representation (input to Actor and Critic networks):
-    s = [breeze, stench, glitter, x, y]
-where x and y are the agent's column/row normalized by SATURATE.
+Fully observable variant: state encodes the full 4x4 map using 4 channels
+(Agent, Gold, Wumpus, Pit) flattened to a 64-dimensional vector.
 
 Actions:
     0 = Up, 1 = Down, 2 = Left, 3 = Right
@@ -19,7 +18,8 @@ import numpy as np
 
 SIZE = 4
 MAX_STEPS = 50
-SATURATE = 0.4
+N_CHANNELS = 4  # agent, gold, wumpus, pit
+STATE_DIM = SIZE * SIZE * N_CHANNELS  # 64
 
 ACTION_DELTAS = {
     0: (0, -1),  # Up
@@ -28,6 +28,8 @@ ACTION_DELTAS = {
     3: (1, 0),   # Right
 }
 
+ACTION_NAMES = {0: "Up", 1: "Down", 2: "Left", 3: "Right"}
+
 REWARD_MOVE = -1
 REWARD_GOLD = 100
 REWARD_PIT = -100
@@ -35,22 +37,27 @@ REWARD_WUMPUS = -100
 
 
 class WumpusWorldEnv:
-    """A Gym-compatible Wumpus World environment (no Gym dependency)."""
+    """Fully observable 4x4 Wumpus World environment (no Gym dependency)."""
 
     def __init__(self, size=SIZE, max_steps=MAX_STEPS, seed=None):
         self.size = size
         self.max_steps = max_steps
-        self.seed = seed
-        self.start = (1, 1)  # (x, y)
+        self.start = (0, 0)
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
-        self.reset()
+        self._gen_map()
+        self.agent_pos = self.start
+        self.steps = 0
 
     def _gen_map(self):
-        self.map = np.zeros((self.size, self.size), dtype=int)
+        """Generate a random map with 1 gold, 1 wumpus, 2-4 pits."""
+        self.gold_pos = None
+        self.wumpus_pos = None
+        self.pit_positions = []
+
         cells = [(x, y) for x in range(self.size) for y in range(self.size)]
-        cells = [c for c in cells if c != self.start]
+        cells.remove(self.start)
         random.shuffle(cells)
 
         self.gold_pos = cells.pop()
@@ -58,64 +65,48 @@ class WumpusWorldEnv:
         n_pits = random.randint(2, 4)
         self.pit_positions = cells[:n_pits]
 
-        self.map[self.gold_pos] = 1          # 1 = gold
-        self.map[self.wumpus_pos] = 2        # 2 = wumpus
+        self.map = np.zeros((self.size, self.size), dtype=int)
+        self.map[self.gold_pos] = 1
+        self.map[self.wumpus_pos] = 2
         for p in self.pit_positions:
-            self.map[p] = 3                  # 3 = pit
+            self.map[p] = 3
 
-    def _cell_has(self, pos, cell_type):
-        x, y = pos
-        if not (0 <= x < self.size and 0 <= y < self.size):
-            return False
-        if cell_type == "gold":
-            return pos == self.gold_pos
-        if cell_type == "wumpus":
-            return pos == self.wumpus_pos
-        if cell_type == "pit":
-            return pos in self.pit_positions
-        return False
+    def _get_state(self):
+        """Return 64-dim fully observable state vector.
 
-    def _is_breeze(self, pos):
-        x, y = pos
-        for dx, dy in ACTION_DELTAS.values():
-            nxt = (x + dx, y + dy)
-            if self._cell_has(nxt, "pit"):
-                return True
-        return False
+        4 channels x 16 cells:
+          channel 0: agent position (one-hot)
+          channel 1: gold position (one-hot)
+          channel 2: wumpus position (one-hot)
+          channel 3: pit positions (multi-hot)
+        """
+        state = np.zeros(STATE_DIM, dtype=np.float32)
+        ax, ay = self.agent_pos
+        state[0 * 16 + ay * self.size + ax] = 1.0
 
-    def _is_stench(self, pos):
-        x, y = pos
-        for dx, dy in ACTION_DELTAS.values():
-            nxt = (x + dx, y + dy)
-            if self._cell_has(nxt, "wumpus"):
-                return True
-        return False
+        gx, gy = self.gold_pos
+        state[1 * 16 + gy * self.size + gx] = 1.0
 
-    def _is_glitter(self, pos):
-        return self._cell_has(pos, "gold")
+        wx, wy = self.wumpus_pos
+        state[2 * 16 + wy * self.size + wx] = 1.0
 
-    def _get_state(self, pos):
-        x, y = pos
-        state = [
-            float(self._is_breeze(pos)),
-            float(self._is_stench(pos)),
-            float(self._is_glitter(pos)),
-            x * SATURATE,
-            y * SATURATE,
-        ]
-        return np.array(state, dtype=np.float32)
+        for px, py in self.pit_positions:
+            state[3 * 16 + py * self.size + px] = 1.0
+
+        return state
 
     def reset(self, seed=None):
+        """Reset environment with optional new seed for map generation."""
         if seed is not None:
-            self.seed = seed
             random.seed(seed)
             np.random.seed(seed)
         self._gen_map()
         self.agent_pos = self.start
         self.steps = 0
-        return self._get_state(self.agent_pos)
+        return self._get_state()
 
     def step(self, action):
+        """Execute action, return (next_state, reward, done, truncated, info)."""
         reward = REWARD_MOVE
         done = False
         info = {"outcome": "move"}
@@ -128,15 +119,15 @@ class WumpusWorldEnv:
             self.agent_pos = (nx, ny)
 
         pos = self.agent_pos
-        if self._cell_has(pos, "gold"):
+        if pos == self.gold_pos:
             reward = REWARD_GOLD
             done = True
             info["outcome"] = "gold"
-        elif self._cell_has(pos, "pit"):
+        elif pos in self.pit_positions:
             reward = REWARD_PIT
             done = True
             info["outcome"] = "pit"
-        elif self._cell_has(pos, "wumpus"):
+        elif pos == self.wumpus_pos:
             reward = REWARD_WUMPUS
             done = True
             info["outcome"] = "wumpus"
@@ -146,19 +137,17 @@ class WumpusWorldEnv:
         if truncated and not done:
             info["outcome"] = "max_steps"
 
-        state = self._get_state(self.agent_pos)
+        state = self._get_state()
         return state, reward, done or truncated, truncated, info
 
-    def explain_state(self, pos=None):
-        pos = pos if pos is not None else self.agent_pos
-        x, y = pos
-        return {
-            "pos": pos,
-            "breeze": float(self._is_breeze(pos)),
-            "stench": float(self._is_stench(pos)),
-            "glitter": float(self._is_glitter(pos)),
-            "state": self._get_state(pos).tolist(),
-        }
+    def get_state_for_cell(self, x, y):
+        """Return the 64-dim state for a hypothetical agent at (x, y)
+        on the current map. Used for policy/value grid visualization."""
+        saved = self.agent_pos
+        self.agent_pos = (x, y)
+        state = self._get_state()
+        self.agent_pos = saved
+        return state
 
     def render(self):
         symbols = {0: ".", 1: "G", 2: "W", 3: "P"}
@@ -175,9 +164,8 @@ class WumpusWorldEnv:
             print("+" + "---+" * self.size)
 
     def __repr__(self):
-        info = self.explain_state()
         return (
-            f"WumpusWorldEnv(agent={info['pos']}, "
-            f"breeze={info['breeze']}, stench={info['stench']}, "
-            f"glitter={info['glitter']}, state={info['state']})"
+            f"WumpusWorldEnv(agent={self.agent_pos}, "
+            f"gold={self.gold_pos}, wumpus={self.wumpus_pos}, "
+            f"pits={self.pit_positions})"
         )
